@@ -67,7 +67,7 @@ class ElmoEmbeddingLayer(tf.keras.layers.Layer):
     super(ElmoEmbeddingLayer, self).__init__(**kwargs)
   
   def build(self, input_shape):
-    self.elmo = hub.load("https://tfhub.dev/google/elmo/3")
+    self.elmo = hub.load("elmo/tf-hub")#"https://tfhub.dev/google/elmo/3")
     super(ElmoEmbeddingLayer, self).build(input_shape)
 
   def call(self, x, mask=None):
@@ -94,15 +94,14 @@ output = tf.keras.layers.Dense(5, activation="sigmoid")(person_embed)
 output = tf.keras.layers.Dense(5, activation="sigmoid")(person_embed)
 model = tf.keras.Model(inputs = model_in, outputs= output)
 '''
-
+'''
 model_in = [tf.keras.Input(shape=(max_len, 2560)) for _ in range(max_doc)]
 q1 = tf.Variable(tf.random.normal((max_len, 2560)),shape= (max_len, 2560),trainable=True, name="query1")
 attention_layer1 = tf.keras.layers.Attention(use_scale= True, score_mode= "dot")
 normalizer = tf.keras.layers.BatchNormalization()
 attens1 = [attention_layer1([q1, normalizer(v)]) for v in model_in]
-bidirectional_lstm1 = tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(64,return_sequences= True, trainable= True, name="inner_lstm"))
-tanh_dense = tf.keras.layers.Dense(128, activation="tanh")
-lstms1 = [tanh_dense(bidirectional_lstm1(atten)) for atten in attens1]
+bidirectional_lstm1 = tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(64,return_sequences= True, trainable= True, name="inner_lstm", activation="tanh"))
+lstms1 = [bidirectional_lstm1(atten) for atten in attens1]
 attention_layer2 = tf.keras.layers.Attention(use_scale= True, score_mode= "dot")
 q2 = tf.Variable(tf.random.normal((max_len, 128)),shape= (max_len, 128),trainable=True, name="query1")
 attens2 = [attention_layer2([q2, v]) for v in lstms1]
@@ -111,14 +110,51 @@ person_embed = bidirectional_lstm2(tf.keras.layers.Reshape((max_doc, max_len*128
 output = tf.keras.layers.Dense(1024, activation="relu")(person_embed)
 normalizer2 = tf.keras.layers.BatchNormalization()
 output = tf.keras.layers.Dense(1024, activation="relu")(normalizer2(output))
-normalizer3 = tf.keras.layers.BatchNormalization()
-output = tf.keras.layers.Dense(5, activation="sigmoid")(normalizer3(output))
+output = tf.keras.layers.Dense(5, activation="sigmoid")(output)
 model = tf.keras.Model(inputs = model_in, outputs= output)
+'''
 
 
+class DeepPersonalityModel(tf.keras.Model):
+  def __init__(self, mlp_layer):
+    super().__init__()
+    self.reshaper = tf.keras.layers.Reshape((max_doc, max_len*128))
+    self.concatenator = tf.keras.layers.Concatenate(axis=1)
+    self.q1 = tf.Variable(tf.random.normal((max_len, 2560)),shape= (max_len, 2560),trainable=True, name="query1")
+    self.attention_layer1 = tf.keras.layers.Attention(use_scale= True, score_mode= "dot",trainable=True)
+    self.normalizer = tf.keras.layers.BatchNormalization()
+    self.bidirectional_lstm1 = tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(64,return_sequences= True, trainable= True, name="inner_lstm", activation="tanh"))
+    self.attention_layer2 = tf.keras.layers.Attention(use_scale= True, score_mode= "dot")
+    self.q2 = tf.Variable(tf.random.normal((max_len, 128)),shape= (max_len, 128),trainable=True, name="query1")
+    self.bidirectional_lstm2 = tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(64,return_sequences= False, trainable= True, name="doc_lstm"))
+    self.mlp_layer = []
+    for hidden_layer in mlp_layer:
+      self.mlp_layer.append(tf.keras.layers.Dense(hidden_layer, activation="relu",trainable=True))
+    self.output_layer = tf.keras.layers.Dense(5, activation="sigmoid",trainable=True)
+  
+  def call(self, inputs):
+    attens1 = [self.attention_layer1([self.q1, self.normalizer(v)]) for v in inputs]
+    lstms1 = [self.bidirectional_lstm1(atten) for atten in attens1]
+    attens2 = [self.attention_layer2([self.q2, v]) for v in lstms1]
+    person_embed = self.bidirectional_lstm2(self.reshaper(self.concatenator(attens2)))
+    for fc in self.mlp_layer:
+      person_embed = fc(person_embed)
+    return self.output_layer(person_embed)
+
+
+model_in = [tf.keras.Input(shape=(max_len, 2560)) for _ in range(max_doc)]
+m = DeepPersonalityModel([1024, 512, 256])(model_in)
+model = tf.keras.Model(inputs = model_in, outputs = m)
+#print(type(model))
+
+tf.keras.utils.plot_model(model, to_file='model.png', show_shapes=True,show_layer_names=True)
+text = Text("trainable variables: " + (str)(len(model.trainable_variables)))
+text.stylize("bold green")
+console.print(text)
 
 loss = tf.keras.losses.MAE
 optimizer = tf.keras.optimizers.Adam()
+
 history = {"loss": [], "val_loss": []}
 for epoch in range(epochs):
     epoch_loss_avg = tf.keras.metrics.Mean()
@@ -130,13 +166,13 @@ for epoch in range(epochs):
         TextColumn("•"),
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
         TextColumn("•"),
-        TextColumn("loss: "),
-        TextColumn("•"),
+        TextColumn("[red]loss: ???"),
+        TextColumn(""),
         TextColumn("")
         )
     with progress_bar as progress:
         task = progress.add_task("[yellow]epoch {}/{}".format(epoch+1, epochs), total=len(train_ds))
-        for idx in range(len(train_ds)):
+        for idx in range(len(train_ds)): #len(train_ds)
             embededs = []
             for i in range(max_doc):
                 if i < len(train_ds.iloc[idx:idx+1]["status"].values[0]):
@@ -155,18 +191,17 @@ for epoch in range(epochs):
                     embededs.append(tf.keras.layers.Add()([synsem, concept]))
                 else:
                     embededs.append(tf.zeros((1, max_len, 2560)))
-            with tf.GradientTape() as tape:    
-                tape.watch(q1)
-                tape.watch(q2)
+            with tf.GradientTape() as tape:
                 output = model(embededs)
+                
                 loss_value = loss(train_ds.iloc[idx:idx+1][["sEXT", "sNEU", "sAGR", "sCON", "sOPN"]].values, output)
-                grads = tape.gradient(loss_value, [q1, q2]+model.trainable_variables)
-                optimizer.apply_gradients(zip(grads, [q1, q2]+model.trainable_variables))
+                grads = tape.gradient(loss_value, model.trainable_variables)
+                optimizer.apply_gradients(zip(grads, model.trainable_variables))
                 epoch_loss_avg.update_state(loss_value)
                 progress.update(task, advance=1)
                 progress.columns[6].text_format = "[red]loss: "+str(epoch_loss_avg.result().numpy())
         
-        for idx in range(len(val_ds)):
+        for idx in range(len(val_ds)):#
             embededs = []
             for i in range(max_doc):
                 if i < len(val_ds.iloc[idx:idx+1]["status"].values[0]):
@@ -188,39 +223,59 @@ for epoch in range(epochs):
             output = model(embededs)
             loss_value = loss(val_ds.iloc[idx:idx+1][["sEXT", "sNEU", "sAGR", "sCON", "sOPN"]].values, output)
             val_loss_avg.update_state(loss_value)
+        progress.columns[7].text_format = "•"
         progress.columns[8].text_format = "[blue]val_loss: "+str(val_loss_avg.result().numpy())
         history["loss"].append(epoch_loss_avg.result().numpy())
         history["val_loss"].append(val_loss_avg.result().numpy())
 
 plt.plot(range(epochs), history["loss"], label="loss")
-plt.plot(range(epoch), history["val_loss"], label="val_loss")
+plt.plot(range(epochs), history["val_loss"], label="val_loss")
 plt.legend()
 plt.show()
 
-test_loss_avg = tf.keras.metrics.Mean()
-for idx in range(len(test_ds)):
-    embededs = []
-    for i in range(max_doc):
-        if i < len(test_ds.iloc[idx:idx+1]["status"].values[0]):
-            embed = elmo(np.array([(str)(test_ds.iloc[idx:idx+1]["status"].values[0][i])]))
-            synsem = tf.keras.layers.Concatenate()([
-                                                    tf.pad(embed["word_emb"],[[0,0],[0,max_len-embed["word_emb"].shape[1]],[0, 0]]),
-                                                    tf.pad(embed["lstm_outputs1"],[[0,0],[0,max_len-embed["word_emb"].shape[1]],[0, 0]]),
-                                                    tf.pad(embed["lstm_outputs2"],[[0,0],[0,max_len-embed["word_emb"].shape[1]],[0, 0]])
-                                                    ])
-            embed = elmo(np.array([(str)(test_ds.iloc[idx:idx+1]["conceptualized"].values[0][i])]))
-            concept = tf.keras.layers.Concatenate()([
-                                                    tf.pad(embed["word_emb"],[[0,0],[0,max_len-embed["word_emb"].shape[1]],[0, 0]]),
-                                                    tf.pad(embed["lstm_outputs1"],[[0,0],[0,max_len-embed["word_emb"].shape[1]],[0, 0]]),
-                                                    tf.pad(embed["lstm_outputs2"],[[0,0],[0,max_len-embed["word_emb"].shape[1]],[0, 0]])
-                                                    ])
-            embededs.append(tf.keras.layers.Add()([synsem, concept]))
-        else:
-            embededs.append(tf.zeros((1, max_len, 2560)))
-    output = model(embededs)
-    loss_value = loss(test_ds.iloc[idx:idx+1][["sEXT", "sNEU", "sAGR", "sCON", "sOPN"]].values, output)
-    test_loss_avg.update_state(loss_value)
+progress_bar = Progress(
+      BarColumn(),
+      MofNCompleteColumn(),
+      TextColumn("•"),
+      TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+      TextColumn("•"),
+      TextColumn("[red]test loss: ???")
+      )
+with progress_bar as progress:
+  task = progress.add_task("[yellow]epoch {}/{}".format(epoch+1, epochs), total=len(test_ds))
 
-print("test loss: ", test_loss_avg.result().numpy())
+  test_loss_avg = tf.keras.metrics.Mean()
+  for idx in range(len(test_ds)):#
+      embededs = []
+      for i in range(max_doc):
+          if i < len(test_ds.iloc[idx:idx+1]["status"].values[0]):
+              embed = elmo(np.array([(str)(test_ds.iloc[idx:idx+1]["status"].values[0][i])]))
+              synsem = tf.keras.layers.Concatenate()([
+                                                      tf.pad(embed["word_emb"],[[0,0],[0,max_len-embed["word_emb"].shape[1]],[0, 0]]),
+                                                      tf.pad(embed["lstm_outputs1"],[[0,0],[0,max_len-embed["word_emb"].shape[1]],[0, 0]]),
+                                                      tf.pad(embed["lstm_outputs2"],[[0,0],[0,max_len-embed["word_emb"].shape[1]],[0, 0]])
+                                                      ])
+              embed = elmo(np.array([(str)(test_ds.iloc[idx:idx+1]["conceptualized"].values[0][i])]))
+              concept = tf.keras.layers.Concatenate()([
+                                                      tf.pad(embed["word_emb"],[[0,0],[0,max_len-embed["word_emb"].shape[1]],[0, 0]]),
+                                                      tf.pad(embed["lstm_outputs1"],[[0,0],[0,max_len-embed["word_emb"].shape[1]],[0, 0]]),
+                                                      tf.pad(embed["lstm_outputs2"],[[0,0],[0,max_len-embed["word_emb"].shape[1]],[0, 0]])
+                                                      ])
+              embededs.append(tf.keras.layers.Add()([synsem, concept]))
+          else:
+              embededs.append(tf.zeros((1, max_len, 2560)))
+      output = model(embededs)
+      loss_value = loss(test_ds.iloc[idx:idx+1][["sEXT", "sNEU", "sAGR", "sCON", "sOPN"]].values, output)
+      test_loss_avg.update_state(loss_value)
+      progress.update(task, advance=1)
+      progress.columns[5].text_format = "[red]test loss: "+str(test_loss_avg.result().numpy())
+      
+text = Text("Saving weights ...")
+text.stylize("bold yellow")
+console.print(text)
+model.save_weights("deepPersonality_weights", save_format="tf")
+text = Text("model saved! Bye")
+text.stylize("bold red")
+console.print(text)
 
                     
